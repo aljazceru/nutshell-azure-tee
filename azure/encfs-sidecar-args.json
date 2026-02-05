@@ -1,0 +1,24 @@
+{
+  "azure_filesystems": [
+    {
+      "mount_point": "/mnt/remote/mint",
+      "azure_url": "https://${STORAGE_ACCOUNT}.blob.core.windows.net/encfs/encfs.img",
+      "azure_url_private": true,
+      "read_write": true,
+      "key": {
+        "kid": "encfs-key",
+        "kty": "RSA-HSM",
+        "authority": {
+          "endpoint": "${ATTESTATION_PROVIDER}.${LOCATION}.attest.azure.net"
+        },
+        "akv": {
+          "endpoint": "${KEY_VAULT_NAME}.vault.azure.net"
+        }
+      },
+      "key_derivation": {
+        "salt": "${SALT_HEX}",
+        "label": "encfs"
+      }
+    }
+  ]
+}

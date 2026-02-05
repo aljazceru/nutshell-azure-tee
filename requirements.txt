@@ -1,0 +1,4 @@
+# Dependencies for verify_attestation.py
+httpx>=0.24.0
+cryptography>=41.0.0
+pyjwt>=2.8.0

@@ -1,0 +1,367 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "containerGroupName": {
+      "type": "string",
+      "defaultValue": "nutshell-tee",
+      "metadata": {
+        "description": "Name for the container group"
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "northeurope",
+      "metadata": {
+        "description": "Location for all resources (must support confidential containers)"
+      }
+    },
+    "nutshellImage": {
+      "type": "string",
+      "metadata": {
+        "description": "Full image path for the Nutshell TEE container (e.g., ghcr.io/user/nutshell-tee:latest)"
+      }
+    },
+    "caddyImage": {
+      "type": "string",
+      "defaultValue": "caddy:2",
+      "metadata": {
+        "description": "Full image path for the Caddy reverse proxy (e.g., ghcr.io/user/nutshell-caddy:latest)"
+      }
+    },
+    "storageAccountName": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Storage account name for Azure Files (Caddy ACME persistence)"
+      }
+    },
+    "storageAccountKey": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Storage account key for Azure Files (Caddy ACME persistence)"
+      }
+    },
+    "caddyFileShareName": {
+      "type": "string",
+      "defaultValue": "caddy",
+      "metadata": {
+        "description": "Azure Files share name for Caddy data persistence"
+      }
+    },
+    "encfsImage": {
+      "type": "string",
+      "defaultValue": "mcr.microsoft.com/aci/encfs:2.12",
+      "metadata": {
+        "description": "Full image path for the EncFS sidecar (e.g., ghcr.io/user/nutshell-encfs:latest)"
+      }
+    },
+    "imageRegistryServer": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Private registry server (e.g., ghcr.io). Leave empty for public images."
+      }
+    },
+    "imageRegistryUsername": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Private registry username. Leave empty for public images."
+      }
+    },
+    "imageRegistryPassword": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Private registry password/token. Leave empty for public images."
+      }
+    },
+    "managedIdentityId": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource ID of the user-assigned managed identity"
+      }
+    },
+    "encfsSidecarArgs": {
+      "type": "securestring",
+      "metadata": {
+        "description": "Base64-encoded encrypted filesystem sidecar configuration"
+      }
+    },
+    "skrSidecarArgs": {
+      "type": "securestring",
+      "metadata": {
+        "description": "Base64-encoded SKR sidecar configuration"
+      }
+    },
+    "maaEndpoint": {
+      "type": "string",
+      "metadata": {
+        "description": "Microsoft Azure Attestation endpoint URL"
+      }
+    },
+    "dnsNameLabel": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "DNS name label for Azure-generated FQDN"
+      }
+    },
+    "customDomain": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Custom domain name for HTTPS (e.g., tee.example.com)"
+      }
+    },
+    "acmeEmail": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Email for Let's Encrypt registration (recommended for HTTPS)"
+      }
+    },
+    "caddyDebug": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Set to '1' to keep Caddy running in debug idle mode for exec access"
+      }
+    },
+    "encfsLogLevel": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "EncFS sidecar log level (trace, debug, info, warning, error, fatal, panic)"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.ContainerInstance/containerGroups",
+      "apiVersion": "2023-05-01",
+      "name": "[parameters('containerGroupName')]",
+      "location": "[parameters('location')]",
+      "identity": {
+        "type": "UserAssigned",
+        "userAssignedIdentities": {
+          "[parameters('managedIdentityId')]": {}
+        }
+      },
+      "properties": {
+        "sku": "Confidential",
+        "confidentialComputeProperties": {
+          "ccePolicy": ""
+        },
+        "osType": "Linux",
+        "restartPolicy": "Always",
+        "ipAddress": "[if(empty(parameters('dnsNameLabel')), createObject('type', 'Public', 'ports', createArray(createObject('port', 80, 'protocol', 'TCP'), createObject('port', 443, 'protocol', 'TCP'))), createObject('type', 'Public', 'dnsNameLabel', parameters('dnsNameLabel'), 'ports', createArray(createObject('port', 80, 'protocol', 'TCP'), createObject('port', 443, 'protocol', 'TCP'))))]",
+        "containers": [
+          {
+            "name": "skr-sidecar",
+            "properties": {
+              "image": "mcr.microsoft.com/aci/skr:2.8",
+              "ports": [
+                {
+                  "port": 9000,
+                  "protocol": "TCP"
+                }
+              ],
+              "resources": {
+                "requests": {
+                  "cpu": 0.5,
+                  "memoryInGB": 1
+                }
+              },
+              "environmentVariables": [
+                {
+                  "name": "SkrSideCarArgs",
+                  "secureValue": "[parameters('skrSidecarArgs')]"
+                }
+              ]
+            }
+          },
+          {
+            "name": "encfs-sidecar",
+            "properties": {
+              "image": "[parameters('encfsImage')]",
+              "command": [
+                "/bin/sh",
+                "-c",
+                "set -e; for m in /mnt/remote/mint /mnt/remote/.filesystem-*; do umount \"$m\" 2>/dev/null || true; done; rm -rf /mnt/remote/mint /mnt/remote/.filesystem-* 2>/dev/null || true; /encfs.sh > /tmp/encfs.log 2>&1 & ENCFSPID=$!; STATUS=/tmp/persist-status.txt; i=0; while [ \"$i\" -lt 120 ]; do MOUNT_DIR=$(ls -d /mnt/remote/.filesystem-* 2>/dev/null | head -n1); if [ -n \"$MOUNT_DIR\" ] && mountpoint -q \"$MOUNT_DIR\"; then break; fi; if mountpoint -q /mnt/remote/mint; then break; fi; i=$((i+1)); sleep 1; done; MOUNT_DIR=$(ls -d /mnt/remote/.filesystem-* 2>/dev/null | head -n1); if [ -n \"$MOUNT_DIR\" ] && mountpoint -q \"$MOUNT_DIR\"; then if ! mountpoint -q /mnt/remote/mint; then mkdir -p /mnt/remote/mint; mount --bind \"$MOUNT_DIR\" /mnt/remote/mint 2>/dev/null || true; fi; fi; SENT_DIR=\"\"; if mountpoint -q /mnt/remote/mint; then SENT_DIR=\"/mnt/remote/mint\"; fi; if [ -n \"$SENT_DIR\" ]; then if [ -f \"$SENT_DIR/.persist-sentinel\" ]; then echo \"[persist] found sentinel: $(cat $SENT_DIR/.persist-sentinel)\" | tee -a \"$STATUS\"; ls -l \"$SENT_DIR/.persist-sentinel\" \"$SENT_DIR/.persist-pad\" 2>/dev/null | tee -a \"$STATUS\" || true; else echo \"[persist] creating sentinel\" | tee -a \"$STATUS\"; date -u > \"$SENT_DIR/.persist-sentinel\"; dd if=/dev/zero of=\"$SENT_DIR/.persist-pad\" bs=1M count=64 status=none; sync; echo \"[persist] sentinel created\" | tee -a \"$STATUS\"; fi; else echo \"[persist] mint mount not ready\" | tee -a \"$STATUS\"; fi; sleep 5; echo \"=== /tmp/persist-status.txt ===\"; cat \"$STATUS\" 2>/dev/null || true; echo \"=== /tmp/encfs.log ===\"; tail -n 400 /tmp/encfs.log || true; for f in /tmp/remotefs*/log-*.txt; do echo \"=== ${f} ===\"; cat \"${f}\"; done; wait $ENCFSPID"
+              ],
+              "resources": {
+                "requests": {
+                  "cpu": 1,
+                  "memoryInGB": 2
+                }
+              },
+              "environmentVariables": [
+                {
+                  "name": "EncfsSideCarArgs",
+                  "secureValue": "[parameters('encfsSidecarArgs')]"
+                },
+                {
+                  "name": "LogLevel",
+                  "value": "[parameters('encfsLogLevel')]"
+                }
+              ],
+              "volumeMounts": [
+                {
+                  "name": "remotemounts",
+                  "mountPath": "/mnt/remote"
+                }
+              ],
+              "securityContext": {
+                "privileged": true
+              }
+            }
+          },
+          {
+            "name": "caddy",
+            "properties": {
+              "image": "[parameters('caddyImage')]",
+              "ports": [
+                {
+                  "port": 80,
+                  "protocol": "TCP"
+                },
+                {
+                  "port": 443,
+                  "protocol": "TCP"
+                }
+              ],
+              "resources": {
+                "requests": {
+                  "cpu": 0.25,
+                  "memoryInGB": 0.5
+                }
+              },
+              "environmentVariables": [
+                {
+                  "name": "CADDY_DOMAIN",
+                  "value": "[if(empty(parameters('customDomain')), if(empty(parameters('dnsNameLabel')), '', concat(parameters('dnsNameLabel'), '.', parameters('location'), '.azurecontainer.io')), parameters('customDomain'))]"
+                },
+                {
+                  "name": "ACME_EMAIL",
+                  "value": "[parameters('acmeEmail')]"
+                },
+                {
+                  "name": "CADDY_DEBUG_IDLE",
+                  "value": "[parameters('caddyDebug')]"
+                }
+              ],
+              "volumeMounts": [
+                {
+                  "name": "caddydata",
+                  "mountPath": "/tmp/caddy-data"
+                }
+              ]
+            }
+          },
+          {
+            "name": "nutshell-mint",
+            "properties": {
+              "image": "[parameters('nutshellImage')]",
+              "ports": [
+                {
+                  "port": 3338,
+                  "protocol": "TCP"
+                }
+              ],
+              "resources": {
+                "requests": {
+                  "cpu": 1,
+                  "memoryInGB": 2
+                }
+              },
+              "environmentVariables": [
+                {
+                  "name": "MINT_DATABASE",
+                  "value": "/app/data/mint"
+                },
+                {
+                  "name": "ENCFS_MOUNT_PATH",
+                  "value": "/app/data/mint"
+                },
+                {
+                  "name": "ENCFS_WAIT_SECONDS",
+                  "value": "180"
+                },
+                {
+                  "name": "ENCFS_REQUIRE_MOUNT",
+                  "value": "true"
+                },
+                {
+                  "name": "ENCFS_REQUIRE_SENTINEL",
+                  "value": "true"
+                },
+                {
+                  "name": "ENCFS_REQUIRE_FUSE",
+                  "value": "false"
+                },
+                {
+                  "name": "ENCFS_WRITE_TEST",
+                  "value": "true"
+                },
+                {
+                  "name": "MINT_LISTEN_HOST",
+                  "value": "0.0.0.0"
+                },
+                {
+                  "name": "MINT_LISTEN_PORT",
+                  "value": "3338"
+                },
+                {
+                  "name": "MINT_BACKEND_BOLT11_SAT",
+                  "value": "SparkWallet"
+                },
+                {
+                  "name": "MAA_ENDPOINT",
+                  "value": "[parameters('maaEndpoint')]"
+                },
+                {
+                  "name": "SKR_ENDPOINT",
+                  "value": "http://localhost:8080"
+                }
+              ],
+              "volumeMounts": [
+                {
+                  "name": "remotemounts",
+                  "mountPath": "/app/data"
+                }
+              ]
+            }
+          }
+        ],
+        "volumes": [
+          {
+            "name": "caddydata",
+            "azureFile": {
+              "shareName": "[parameters('caddyFileShareName')]",
+              "storageAccountName": "[parameters('storageAccountName')]",
+              "storageAccountKey": "[parameters('storageAccountKey')]"
+            }
+          },
+          {
+            "name": "remotemounts",
+            "emptyDir": {}
+          }
+        ],
+        "imageRegistryCredentials": "[if(empty(parameters('imageRegistryServer')), json('[]'), createArray(createObject('server', parameters('imageRegistryServer'), 'username', parameters('imageRegistryUsername'), 'password', parameters('imageRegistryPassword'))))]"
+      }
+    }
+  ],
+  "outputs": {
+    "containerIPv4Address": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.ContainerInstance/containerGroups', parameters('containerGroupName'))).ipAddress.ip]"
+    },
+    "mintUrl": {
+      "type": "string",
+      "value": "[concat('https://', if(empty(parameters('customDomain')), if(empty(parameters('dnsNameLabel')), reference(resourceId('Microsoft.ContainerInstance/containerGroups', parameters('containerGroupName'))).ipAddress.ip, concat(parameters('dnsNameLabel'), '.', parameters('location'), '.azurecontainer.io')), parameters('customDomain')))]"
+    }
+  }
+}

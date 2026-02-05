@@ -1,0 +1,5 @@
+__ACME_GLOBAL__
+__CADDY_DOMAIN__ {
+  reverse_proxy 127.0.0.1:3338
+  encode gzip
+}
